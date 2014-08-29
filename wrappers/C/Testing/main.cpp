@@ -163,6 +163,12 @@ int main(int argc, char* argv[])
         runner1.RunTestsIf(Test::GetTestList(), "SBML_TEST_SUITE_COMP", True(), 0);
     }
 
+    if (args.Suites.find('M') != std::string::npos)
+    {
+        clog << "Running Suite ALEX_TESTS\n";
+        clog << "ModelPath " << gTSModelsPath;
+        runner1.RunTestsIf(Test::GetTestList(), "ALEX_TESTS", True(), 0);
+    }
 
     //Finish outputs result to xml file
     runner1.Finish();
