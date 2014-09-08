@@ -33,6 +33,7 @@ extern string   gTempFolder;
 extern string   gTestDataFolder;
 extern string   gCompiler;
 
+bool sameInstances(RRHandle a, RRHandle b);
 
 SUITE(ALEX_TESTS)
 {
@@ -44,18 +45,21 @@ SUITE(ALEX_TESTS)
         loadSBMLFromFileE (mRR1, TestModelFileName.c_str(), true);
         loadSBMLFromFileE (mRR2, TestModelFileName.c_str(), true);
 
+        cout << "\nWords here";
+        cout << "\n";
+
         CHECK (simulateEx (mRR1, 0, 10, 100));
         reset (mRR1);
-        CHECK (mRR1 == mRR2);
+        CHECK (sameInstances (mRR1, mRR2));
         
         CHECK (setGlobalParameterByIndex (mRR1, 0, 20));
         resetAll (mRR1);
-        CHECK (mRR1 == mRR2);
+        CHECK (sameInstances (mRR1, mRR2));
 
         RRVectorPtr myVec = getFloatingSpeciesInitialConcentrations (mRR1);
         CHECK (setVectorElement (myVec, 0, 10));
         resetToOrigin (mRR1);
-        CHECK (mRR1 == mRR2);
+        CHECK (sameInstances (mRR1, mRR2));
         freeRRInstance (mRR1);
         freeRRInstance (mRR2);
     }
@@ -64,4 +68,61 @@ SUITE(ALEX_TESTS)
     {
 
     }
+}
+
+bool sameInstances(RRHandle a, RRHandle b) {
+        vector<char*> keys(19);
+        keys[0] = "src";
+        keys[1] = "waste";
+        keys[2] = "Xo";
+        keys[3] = "X1";
+        keys[4] = "S1";
+        keys[5] = "S2";
+        keys[6] = "S3";
+        keys[7] = "kk1";
+        keys[8] = "k1";
+        keys[9] = "k_1";
+        keys[10] = "kk2";
+        keys[11] = "kk2";
+        keys[12] = "k2";
+        keys[13] = "k_2";
+        keys[14] = "kk3";
+        keys[15] = "k3";
+        keys[16] = "k_3";
+        keys[17] = "kk4";
+        keys[18] = "k4";
+        keys[19] = "k_4";
+        bool ret = true;
+
+        for (int i = 0; i < keys.size(); i++) {
+            double v1;
+            double v2;
+            
+            getValue(a, keys[i], &v1);
+            getValue(b, keys[i], &v2);
+            if (v1 != v2) {
+                ret = false;
+                cout << keys[i] << " failed as v1 = " << v1 << " and v2 = " << v2 << "\n";
+            }
+        }
+
+        RRVectorPtr i1;
+        RRVectorPtr i2;
+        i1 = getFloatingSpeciesInitialConcentrations(a);
+        i2 = getFloatingSpeciesInitialConcentrations(b);
+
+        if (i1->Count == i2->Count) {
+            for (int i = 0; i < i1->Count; i++) {
+                if (i1->Data[i] != i2->Data[i]) {
+                    ret = false;
+                }
+            }
+        } else {
+            ret = false;
+        }
+
+        
+        if (!ret)
+            cout << "failed";
+        return ret;
 }

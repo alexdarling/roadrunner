@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet href="api_tests.xsl" type="text/xsl" ?>
+<unittest-results date_time = "2014-08-29 16:18:53" tests="2" failedtests="1" failures="3" time="0.047">
+<test suite="ALEX_TESTS" name="RESET_MODELS" time="0.044"><failure message="Suite_Alex_Tests.cpp(49) : mRR1 == mRR2"/><failure message="Suite_Alex_Tests.cpp(53) : mRR1 == mRR2"/><failure message="Suite_Alex_Tests.cpp(58) : mRR1 == mRR2"/></test>
+<test suite="ALEX_TESTS" name="GILLESPIE_MEANS_STDEV" time="0"/>
+</unittest-results>
