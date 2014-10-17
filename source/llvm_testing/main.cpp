@@ -180,13 +180,13 @@ int jacobian_test(int argc, char* argv[])
 
         ls::DoubleMatrix mat = r.getFullJacobian();
 
-        cout << "amount mode full jabobian: " << endl;
+        cout << "amount mode full jacobian: " << endl;
 
         cout << mat << endl;
 
         mat = r.getReducedJacobian();
 
-        cout << "amount mode reduced jabobian: " << endl;
+        cout << "amount mode reduced jacobian: " << endl;
 
         cout << mat << endl;
 
@@ -196,13 +196,13 @@ int jacobian_test(int argc, char* argv[])
 
         mat = r.getFullJacobian();
 
-        cout << "concentration mode full jabobian: " << endl;
+        cout << "concentration mode full jacobian: " << endl;
 
         cout << mat << endl;
 
         mat = r.getReducedJacobian();
 
-        cout << "concentration mode reduced jabobian: " << endl;
+        cout << "concentration mode reduced jacobian: " << endl;
 
         cout << mat << endl;
 
@@ -210,6 +210,7 @@ int jacobian_test(int argc, char* argv[])
     catch(std::exception &e)
     {
         cout << e.what() << endl;
+        return -1;
     }
     return 0;
 }
@@ -330,6 +331,39 @@ int validate_test(int argc, char* argv[])
     return -1;
 }
 
+int distrib_test(int argc, char* argv[])
+{
+    try {
+        if (argc < 3)
+        {
+            cout << "usage: llvm_testing distrib fname";
+            return -1;
+        }
+
+        cout << "r1 values:" << endl;
+
+        RoadRunner r1(argv[2]);
+
+        for (int i = 0; i < 5; ++i) {
+            cout << "value: " << r1.getValue("rand") << endl;
+        }
+
+        cout << "r2 values: " << endl;
+
+        RoadRunner r2(argv[2]);
+
+        for (int i = 0; i < 5; ++i) {
+            cout << "value: " << r2.getValue("rand") << endl;
+        }
+
+
+    }
+    catch(std::exception& e) {
+        cout << e.what();
+    }
+    return -1;
+}
+
 
 int main(int argc, char* argv[])
 {
@@ -360,6 +394,10 @@ int main(int argc, char* argv[])
 
     if(strcmp("validate", argv[1]) == 0) {
         return validate_test(argc, argv);
+    }
+
+    if(strcmp("distrib", argv[1]) == 0) {
+        return distrib_test(argc, argv);
     }
 
     cout << "error, invalid test name: " << argv[1] << endl;

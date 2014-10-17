@@ -141,16 +141,26 @@
  *  copy data
  */
 %typemap(out) ls::DoubleMatrix {
-
+    PyObject *pArray = NULL;
     int rows = ($1).numRows();
     int cols = ($1).numCols();
-    int nd = 2;
-    npy_intp dims[2] = {rows, cols};
     double *data = (double*)malloc(sizeof(double)*rows*cols);
     memcpy(data, ($1).getArray(), sizeof(double)*rows*cols);
 
-    PyObject *pArray = PyArray_New(&PyArray_Type, nd, dims, NPY_DOUBLE, NULL, data, 0,
-            NPY_CARRAY | NPY_OWNDATA, NULL);
+    if(cols == 1) {
+        int nd = 1;
+        npy_intp dims[1] = {rows};
+        pArray = PyArray_New(&PyArray_Type, nd, dims, NPY_DOUBLE, NULL, data, 0,
+                             NPY_CARRAY | NPY_OWNDATA, NULL);
+
+    } 
+    else {
+        int nd = 2;
+        npy_intp dims[2] = {rows, cols};
+        pArray = PyArray_New(&PyArray_Type, nd, dims, NPY_DOUBLE, NULL, data, 0,
+                             NPY_CARRAY | NPY_OWNDATA, NULL);
+    }
+
     VERIFY_PYARRAY(pArray);
     $result  = pArray;
 }
@@ -161,15 +171,24 @@
  * reference roadrunner owned data.
  */
 %typemap(out) const ls::DoubleMatrix* {
-
+    PyObject *pArray = NULL;
     int rows = ($1)->numRows();
     int cols = ($1)->numCols();
-    int nd = 2;
-    npy_intp dims[2] = {rows, cols};
     double *data = ($1)->getArray();
 
-    PyObject *pArray = PyArray_New(&PyArray_Type, nd, dims, NPY_DOUBLE, NULL, data, 0,
-            NPY_CARRAY, NULL);
+    if(cols == 1) {
+        int nd = 1;
+        npy_intp dims[1] = {rows};
+        pArray = PyArray_New(&PyArray_Type, nd, dims, NPY_DOUBLE, NULL, data, 0,
+                             NPY_CARRAY, NULL);
+    } 
+    else {
+        int nd = 2;
+        npy_intp dims[2] = {rows, cols};
+        pArray = PyArray_New(&PyArray_Type, nd, dims, NPY_DOUBLE, NULL, data, 0,
+                             NPY_CARRAY, NULL);
+    }
+
     VERIFY_PYARRAY(pArray);
     $result  = pArray;
 }
@@ -200,6 +219,65 @@
 
     $result  = array;
 }
+
+
+/* Convert from C --> Python */
+%typemap(out) std::vector<ls::Complex> {
+
+    typedef std::complex<double> cpx;
+
+    std::vector<cpx>& vec = $1;
+
+    bool iscpx = false;
+
+    // small number
+    double epsilon = 2 * std::numeric_limits<double>::epsilon();
+    for (std::vector<cpx>::const_iterator i = vec.begin(); i != vec.end(); ++i)
+    {
+        iscpx = iscpx || (std::imag(*i) >= epsilon);
+        if (iscpx) break;
+    }
+
+    if (iscpx) {
+        int len = $1.size();
+        npy_intp dims[1] = {len};
+        
+        PyObject *array = PyArray_SimpleNew(1, dims, NPY_COMPLEX128);
+        VERIFY_PYARRAY(array);
+        
+        if (!array) {
+            // TODO error handling.
+            return 0;
+        }
+        
+        cpx *data = (cpx*)PyArray_DATA((PyArrayObject*)array);
+        
+        memcpy(data, &vec[0], sizeof(std::complex<double>)*len);
+        
+        $result  = array;
+    } else {
+        int len = $1.size();
+        npy_intp dims[1] = {len};
+        
+        PyObject *array = PyArray_SimpleNew(1, dims, NPY_DOUBLE);
+        VERIFY_PYARRAY(array);
+        
+        if (!array) {
+            // TODO error handling.
+            return 0;
+        }
+        
+        double *data = (double*)PyArray_DATA((PyArrayObject*)array);
+
+        for (int i = 0; i < vec.size(); ++i) {
+            data[i] = std::real(vec[i]);
+        }
+        
+        $result  = array;
+    }
+}
+
+
 
 %typemap(out) const rr::Variant& {
     try {
@@ -497,15 +575,14 @@ PyObject *Integrator_NewPythonObj(rr::Integrator* i) {
 %ignore rr::RoadRunner::getNumberOfDependentSpecies;
 //%ignore rr::RoadRunner::getUnscaledConcentrationControlCoefficientMatrix;
 %ignore rr::RoadRunner::setTimeEnd;
-//%ignore rr::RoadRunner::getEigenvalueIds;
+
 %ignore rr::RoadRunner::getNumberOfFloatingSpecies;
 //%ignore rr::RoadRunner::getUnscaledElasticityMatrix;
 %ignore rr::RoadRunner::setTimeStart;
-//%ignore rr::RoadRunner::getEigenvalues;
+
 %ignore rr::RoadRunner::getNumberOfGlobalParameters;
 //%ignore rr::RoadRunner::getUnscaledFluxControlCoefficientMatrix;
 //%ignore rr::RoadRunner::setValue;
-%ignore rr::RoadRunner::getEigenvaluesCpx;
 %ignore rr::RoadRunner::getNumberOfIndependentSpecies;
 //%ignore rr::RoadRunner::getUnscaledSpeciesElasticity;
 //%ignore rr::RoadRunner::simulate;
@@ -987,7 +1064,7 @@ namespace std { class ostream{}; }
         def _makeProperties(self):
 
             #global _properties
-       
+
             # always clear the old properties
             for s in RoadRunner._properties:
                 del RoadRunner.__swig_getmethods__[s]
@@ -1003,9 +1080,9 @@ namespace std { class ostream{}; }
 
             model = self.getModel()
 
-            # can't make properties without a model. 
+            # can't make properties without a model.
             if model is None:
-                return 
+                return
 
             def mk_fget(sel): return lambda self: model.__getitem__(sel)
             def mk_fset(sel): return lambda self, val: model.__setitem__(sel, val)
@@ -1033,23 +1110,23 @@ namespace std { class ostream{}; }
 
 
 
-        # Set up the python dyanic properties for model access, 
+        # Set up the python dyanic properties for model access,
         # save the original init method
-        _swig_init = __init__  
+        _swig_init = __init__
 
         def _new_init(self, *args):
             RoadRunner._swig_init(self, *args)
             RoadRunner._makeProperties(self)
-       
+
         # set the ctor to use the new init
         __init__ = _new_init
 
-        
+
 
 
         def load(self, *args):
             self._load(*args)
-            RoadRunner._makeProperties(self) 
+            RoadRunner._makeProperties(self)
 
 
         def keys(self, types=_roadrunner.SelectionRecord_ALL):

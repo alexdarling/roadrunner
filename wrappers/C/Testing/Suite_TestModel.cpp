@@ -1,11 +1,14 @@
 #include <string>
-#include "rrLogger.h"
-#include "rrUtils.h"
-#include "rrIniFile.h"
-#include "UnitTest++.h"
-#include "rrc_api.h"
-#include "src/TestUtils.h"
 #include "Suite_TestModel.h"
+#include "UnitTest++.h"
+#include "rrConfig.h"
+#include "rrIniFile.h"
+#include "rrLogger.h"
+#include "rrRoadRunner.h"
+#include "rrUtils.h"
+#include "rrc_api.h"
+#include "rrc_cpp_support.h"
+#include "src/TestUtils.h"
 
 #include "Poco/Path.h"
 #include "Poco/Glob.h"
@@ -21,7 +24,140 @@ extern string gTempFolder;
 extern string gTestDataFolder;
 extern string gCompiler;
 
-//This tests is mimicking the Python tests
+string Trim(const string& input)
+{
+  string ret = trim(input, '\n');
+  if (!ret.empty() && ret[0] == '"' && ret[ret.size()-1]=='"')
+  {
+    ret = ret.replace(0,1,"");
+    ret = ret.replace(ret.size()-1, 1, "");
+  }
+  return ret;
+}
+
+void compareJacobians(RRHandle gRR)
+{
+  RoadRunner* rri = castToRoadRunner(gRR);
+  ls::DoubleMatrix    jFull     = rri->getFullJacobian();
+  ls::DoubleMatrix    jReduced  = rri->getReducedJacobian();
+
+  //Check dimensions
+  if(jFull.RSize() != jReduced.RSize() ||
+    jFull.CSize() != jReduced.CSize())
+  {
+    CHECK(false);
+    return;
+  }
+
+  for(int row = 0; row < jFull.RSize(); row++)
+  {
+    for(int col = 0; col < jFull.CSize(); col++)
+    {
+      CHECK_CLOSE(jFull(row, col), jReduced(row, col), 1e-6);
+    }
+  }
+}
+
+void compareMatrices(const ls::DoubleMatrix& ref, const ls::DoubleMatrix& calc)
+{
+    clog << "Reference Matrix:" << endl;
+    clog << ref << endl;
+
+    clog << "Calculated Matrix:" << endl;
+    clog << calc << endl;
+
+    if ((calc.RSize() != ref.RSize()) || (calc.CSize() != ref.CSize()))
+    {
+        CHECK(false);
+        return;
+    }
+
+    for (int i = 0; i < ref.RSize(); i++)
+    {
+        for (int j = 0; j < ref.CSize(); j++)
+        {
+            CHECK_CLOSE(ref(i, j), calc(i, j), abs((ref(i,j)+1e-7)*1e-4));
+        }
+    }
+}
+
+
+void compareMatrices(const ls::DoubleMatrix& ref, const std::vector<ls::Complex> calc)
+{
+    clog<<"Reference Matrix:" << endl;
+    clog<<ref<<endl;
+
+    clog<<"Calculated Matrix:" << endl;
+    for(int i = 0; i < calc.size(); ++i)
+    {
+        clog << calc[i] << endl;
+    }
+
+    if((ref.CSize() != 2) || (calc.size() != ref.RSize()))
+    {
+        CHECK(false);
+        return;
+    }
+
+    for(int i = 0 ; i < ref.RSize(); i++)
+    {
+        CHECK_CLOSE(ref(i,0), std::real(calc[i]), abs((ref(i,0)+1e-7)*1e-4));
+        CHECK_CLOSE(ref(i,1), std::imag(calc[i]), abs((ref(i,1)+1e-7)*1e-4));
+    }
+}
+
+void compareMatrices(const ls::DoubleMatrix& ref, RRDoubleMatrixPtr calc)
+{
+    if(!calc)
+    {
+      CHECK(false);
+      return;
+    }
+
+    clog<<"Reference Matrix:\n";
+    clog<<ref<<endl;
+
+    clog<<"Calculated Matrix:";
+    clog<<matrixToString(calc);
+
+    if(!calc || calc->RSize != ref.RSize())
+    {
+      CHECK(false);
+      return;
+    }
+
+    if(!calc || calc->CSize != ref.CSize())
+    {
+      CHECK(false);
+      return;
+    }
+
+    for(int i = 0 ; i < ref.RSize(); i++)
+    {
+      for(int j=0; j < ref.CSize(); j++)
+      {
+        double val;
+        if(!getMatrixElement(calc, i , j, &val))
+        {
+          CHECK(false);
+        }
+        CHECK_CLOSE(ref(i,j), val, abs((val+1e-7)*1e-4));
+      }
+    }
+}
+
+void trySteadyState(RRHandle& gRR)
+{
+    double val;
+    for (int i=0; i<10; i++)
+    {
+        CHECK( steadyState(gRR, &val));
+        if (val<1e-5) break;
+    }
+    CHECK_CLOSE(0, val, 1e-5);
+}
+
+//These tests are intended to duplicate the Python tests
 SUITE(TEST_MODEL)
 {
     // the current test data file that the test suite is using.
@@ -29,9 +165,6 @@ SUITE(TEST_MODEL)
 
     // the current ini file that the test suite is using.
     IniFile iniFile;
-
-    // global test model file name (pulled from dat file).
-    string TestModelFileName;
 
     // global RoadRunner ptr
     RRHandle gRR = NULL;
@@ -68,8 +201,7 @@ SUITE(TEST_MODEL)
 
         Log(Logger::LOG_NOTICE) << "Looking in " << path.toString() << " for test files";
 
-        // for the time being, use this name convention, NOM_Test.dat is there.
-        path.setFileName("Test*.dat");
+        path.setFileName("*.rrtest");
 
         std::set<std::string> files;
 
@@ -95,17 +227,25 @@ SUITE(TEST_MODEL)
         CHECK(fileExists(TestDataFileName));
         CHECK(iniFile.Load(TestDataFileName));
 
-        if(iniFile.GetSection("SBML_FILES"))
+        IniSection* sbmlsec = iniFile.GetSection("SBML");
+        if(!sbmlsec)
         {
-            IniSection* sbml = iniFile.GetSection("SBML_FILES");
-            IniKey* fNameKey = sbml->GetKey("FNAME1");
-            if(fNameKey)
-            {
-                TestModelFileName  = joinPath(gTestDataFolder, fNameKey->mValue);
-                CHECK(fileExists(TestModelFileName));
-            }
+            CHECK(false);
+            Log(Logger::LOG_FATAL) << "No 'SBML' section found in " << TestDataFileName;
+            return;
         }
-        CHECK(loadSBMLFromFileE(gRR, TestModelFileName.c_str(), true));
+        sbmlsec->mIsUsed = true;
+        string sbml = sbmlsec->GetNonKeysAsString();
+        if (sbml.find('<') == string::npos)
+        {
+            sbml = joinPath(gTestDataFolder, trim(sbml, '\n'));
+            CHECK(fileExists(sbml));
+        }
+        if(!loadSBMLEx(gRR, sbml.c_str(), true))
+        {
+            CHECK(false);
+            Log(Logger::LOG_FATAL) << "Unable to load SBML:" << endl << sbml;
+        }
     }
 
     TEST(SET_COMPUTE_AND_ASSIGN_CONSERVATION_LAWS)
@@ -127,16 +267,15 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== SET_STEADY_STATE_SELECTION_LIST ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
-        bool res = setSteadyStateSelectionList(gRR, aKey->mValue.c_str());
+        bool res = setSteadyStateSelectionList(gRR, keys.c_str());
         CHECK(res);
+
+        //Actually calculate the steady state:
+        trySteadyState(gRR);
     }
 
     TEST(GET_STEADY_STATE_SELECTION_LIST)
@@ -147,13 +286,9 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_STEADY_STATE_SELECTION_LIST ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getSteadyStateSelectionList(gRR);
 
@@ -162,20 +297,18 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
-        CHECK(selList.size() == list->Count);
+        vector<string> selList = splitString(keys," ,");
+        if (selList.size() != list->Count)
+        {
+          CHECK(false);
+          freeStringArray(list);
+          return;
+        }
         for(int i = 0; i < selList.size(); i++)
         {
             CHECK(selList[i] == list->String[i]);
         }
         freeStringArray(list);
-    }
-
-    TEST(COMPUTE_STEADY_STATE)
-    {
-        double val;
-        CHECK( steadyState(gRR, &val));
-        CHECK_CLOSE(0, val, 1e-6);
     }
 
     TEST(SPECIES_CONCENTRATIONS)
@@ -189,23 +322,24 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== SPECIES_CONCENTRATIONS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        for(int i = 0 ; i < aSection->KeyCount(); i++)
+        string valstr = Trim(aSection->GetNonKeysAsString());
+        vector<string> vals = splitString(valstr, " ");
+        for(int i = 0 ; i < vals.size(); i++)
         {
-            IniKey *aKey = aSection->GetKey(i);
-
             double val;
 
             //API Function getValue
-            if(!getValue(gRR, aKey->mKey.c_str(), &val))
+            if(!getValue(gRR, vals[i].c_str(), &val))
             {
                 CHECK(false);
             }
 
             //Check concentrations
-            CHECK_CLOSE(aKey->AsFloat(), val, 1e-6);
+            CHECK_CLOSE(toDouble(vals[i]), val, 1e-6);
             clog<<"\n";
-            clog<<"Ref:\t"<<aKey->AsFloat()<<"\tActual:\t "<<val<<endl;
+            clog<<"Ref:\t"<<vals[i]<<"\tActual:\t "<<val<<endl;
         }
     }
 
@@ -220,6 +354,7 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_SPECIES_INITIAL_CONCENTRATIONS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
         for(int i = 0 ; i < aSection->KeyCount(); i++)
         {
@@ -248,9 +383,11 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_SPECIES_INITIAL_CONCENTRATION_BY_INDEX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        RRStringArray *arr = getFloatingSpeciesIds(gRR);
-        for(int i = 0 ; i < aSection->KeyCount(); i++)
+        string valstr = Trim(aSection->GetNonKeysAsString());
+        vector<string> vals = splitString(valstr, " ");
+        for(size_t i = 0 ; i < vals.size(); i++)
         {
             IniKey *aKey = aSection->GetKey(i);
             double val;
@@ -260,10 +397,47 @@ SUITE(TEST_MODEL)
             }
 
             //Check concentrations
-            CHECK_CLOSE(aKey->AsFloat(), val, 1e-6);
+            CHECK_CLOSE(toDouble(vals[i]), val, 1e-6);
             clog<<"\n";
-            clog<<"Ref:\t"<<aKey->AsFloat()<<"\tActual:\t "<<val<<endl;
+            clog<<"Ref:\t"<<toDouble(vals[i])<<"\tActual:\t "<<val<<endl;
         }
+    }
+
+    TEST(GET_INITIAL_FLOATING_SPECIES_CONCENTRATIONS)
+    {
+        CHECK(gRR!=NULL);
+
+        //Read in the reference data, from the ini file
+        IniSection* aSection = iniFile.GetSection("Get Initial Floating Species Concs");
+        if(!aSection || !gRR)
+        {
+            return;
+        }
+        clog<< endl << "==== GET_INITIAL_FLOATING_SPECIES_CONCENTRATIONS ====" << endl << endl;
+        aSection->mIsUsed = true;
+
+        string keys = Trim(aSection->GetNonKeysAsString());
+
+        RRVector* values = getFloatingSpeciesInitialConcentrations(gRR);
+
+        vector<string> refList = splitString(keys," ,");
+
+        if(!values || values->Count != refList.size())
+        {
+            CHECK(false);
+            freeVector(values);
+            return;
+        }
+
+        for(int i = 0 ; i < refList.size(); i++)
+        {
+
+            //Check concentrations
+            CHECK_CLOSE(toDouble(refList[i]), values->Data[i], 1e-6);
+            clog<<"\n";
+            clog<<"Ref:\t"<<toDouble(refList[i])<<"\tActual:\t "<<values->Data[i]<<endl;
+        }
+        freeVector(values);
     }
 
     TEST(SET_SPECIES_INITIAL_CONCENTRATION_BY_INDEX)
@@ -277,14 +451,15 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== SET_SPECIES_INITIAL_CONCENTRATION_BY_INDEX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        RRStringArray *arr = getFloatingSpeciesIds(gRR);
-        for(int i = 0 ; i < aSection->KeyCount(); i++)
+        string valstr = Trim(aSection->GetNonKeysAsString());
+        vector<string> vals = splitString(valstr, " ");
+        for(size_t i = 0 ; i < vals.size(); i++)
         {
-            IniKey *aKey = aSection->GetKey(i);
-
             //Set the value..
-            setFloatingSpeciesInitialConcentrationByIndex(gRR, i, aKey->AsFloat());
+            double newval = toDouble(vals[i]);
+            setFloatingSpeciesInitialConcentrationByIndex(gRR, i, newval);
 
             double val;
             //Read it back
@@ -294,14 +469,10 @@ SUITE(TEST_MODEL)
             }
 
             //Check concentrations
-            CHECK_CLOSE(aKey->AsFloat(), val, 1e-6);
+            CHECK_CLOSE(newval, val, 1e-6);
             clog<<"\n";
-            clog<<"Ref:\t"<<aKey->AsFloat()<<"\tActual:\t "<<val<<endl;
+            clog<<"Ref:\t"<<newval<<"\tActual:\t "<<val<<endl;
         }
-
-        double val;
-        reset(gRR);
-        steadyState(gRR, &val);
     }
 
     TEST(SET_SPECIES_INITIAL_CONCENTRATIONS)
@@ -315,6 +486,7 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== SET_SPECIES_INITIAL_CONCENTRATIONS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
         for(int i = 0 ; i < aSection->KeyCount(); i++)
         {
@@ -337,22 +509,25 @@ SUITE(TEST_MODEL)
         }
 
         //We need to set back the values to concentrations, after running steady state..
-        double val;
         reset(gRR);
-        steadyState(gRR, &val);
+        trySteadyState(gRR);
     }
 
-    TEST(FLUXES)
+    TEST(STEADY_STATE_FLUXES)
     {
         CHECK(gRR!=NULL);
 
         //Read in the reference data, from the ini file
-        IniSection* aSection = iniFile.GetSection("Fluxes");
+        IniSection* aSection = iniFile.GetSection("Steady State Fluxes");
         if(!aSection || !gRR)
         {
             return;
         }
-        clog<< endl << "==== FLUXES ====" << endl << endl;
+
+        clog<< endl << "==== STEADY STATE FLUXES ====" << endl << endl;
+        aSection->mIsUsed = true;
+
+        trySteadyState(gRR);
 
         for(int i = 0 ; i < aSection->KeyCount(); i++)
         {
@@ -366,7 +541,7 @@ SUITE(TEST_MODEL)
             }
 
             //Check concentrations
-            CHECK_CLOSE(aKey->AsFloat(), val, 1e-6);
+            CHECK_CLOSE(aKey->AsFloat(), val, max(1e-9, abs(val*1e-5)));
             clog<<"\n";
             clog<<"Ref:\t"<<aKey->AsFloat()<<"\tActual:\t "<<val<<endl;
         }
@@ -379,51 +554,103 @@ SUITE(TEST_MODEL)
         {
             return;
         }
-        clog<< endl << "==== FULL_JACOBIAN ====" << endl << endl;
+        clog<< endl << "==== FULL JACOBIAN ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        RRDoubleMatrixPtr       jActual     = getFullJacobian(gRR);
-        ls::DoubleMatrix     jRef        = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_CONCENTRATIONS);
+        RoadRunner* rri = castToRoadRunner(gRR);
 
-        //Check dimensions
-        if(jActual->RSize != jRef.RSize() || jActual->CSize != jRef.CSize())
+        ls::DoubleMatrix   jActual = rri->getFullJacobian();
+        ls::DoubleMatrix   jRef    = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+
+        compareMatrices(jRef, jActual);
+    }
+
+    TEST(REDUCED_JACOBIAN)
+    {
+        IniSection* aSection = iniFile.GetSection("Reduced Jacobian");
+        if(!aSection)
         {
-            CHECK(false);
             return;
         }
+        clog<< endl << "==== REDUCED JACOBIAN ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        for(int row = 0; row < jActual->RSize; row++)
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_CONCENTRATIONS);
+        RoadRunner* rri = castToRoadRunner(gRR);
+
+        ls::DoubleMatrix   jActual = rri->getReducedJacobian();
+        ls::DoubleMatrix   jRef    = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+
+        compareMatrices(jRef, jActual);
+    }
+
+    TEST(AMOUNT_JACOBIAN)
+    {
+        IniSection* aSection = iniFile.GetSection("Amount Jacobian");
+        if(!aSection)
         {
-            for(int col = 0; col < jActual->CSize; col++)
-            {
-              CHECK_CLOSE(jRef(row,col), jActual->Data[row*jActual->CSize + col], 1e-6);
-            }
+            return;
         }
-        //Clean up...
-        freeMatrix(jActual);
+        clog<< endl << "==== AMOUNT JACOBIAN ====" << endl << endl;
+        aSection->mIsUsed = true;
+
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_AMOUNTS);
+        RoadRunner* rri = castToRoadRunner(gRR);
+
+        ls::DoubleMatrix   jActual = rri->getFullJacobian();
+        ls::DoubleMatrix   jRef    = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+
+        compareMatrices(jRef, jActual);
     }
 
     TEST(INDIVIDUAL_EIGENVALUES)
     {
-        IniSection* aSection = iniFile.GetSection("Individual EigenValues");
+        IniSection* aSection = iniFile.GetSection("Individual Eigenvalues");
         if(!aSection)
         {
             return;
         }
         clog<< endl << "==== INDIVIDUAL_EIGENVALUES ====" << endl << endl;
+        aSection->mIsUsed = true;
 
+        RoadRunner* rri = castToRoadRunner(gRR);
+
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_CONCENTRATIONS);
         for(int i = 0 ; i < aSection->KeyCount(); i++)
         {
             IniKey *aKey = aSection->GetKey(i);
             clog<<"\n";
             clog<<"Ref_EigenValue: "<<aKey->mKey<<": "<<aKey->mValue<<endl;
 
-            double val;
+            string eigenValueLabel ="eigen(" + aKey->mKey + ")";
+            double val = rri->getValue(eigenValueLabel.c_str());
+
+            clog<<"EigenValue "<<i<<": "<<val<<endl;
+            CHECK_CLOSE(aKey->AsFloat(), val, abs(val*1e-4));
+        }
+    }
+
+    TEST(INDIVIDUAL_AMOUNT_EIGENVALUES)
+    {
+        IniSection* aSection = iniFile.GetSection("Individual Amount Eigenvalues");
+        if(!aSection)
+        {
+            return;
+        }
+        clog<< endl << "==== INDIVIDUAL AMOUNT EIGENVALUES ====" << endl << endl;
+        aSection->mIsUsed = true;
+
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_AMOUNTS);
+        RoadRunner* rri = castToRoadRunner(gRR);
+        for(int i = 0 ; i < aSection->KeyCount(); i++)
+        {
+            IniKey *aKey = aSection->GetKey(i);
+            clog<<"\n";
+            clog<<"Ref_EigenValue: "<<aKey->mKey<<": "<<aKey->mValue<<endl;
 
             string eigenValueLabel ="eigen(" + aKey->mKey + ")";
-            if(!getValue(gRR, eigenValueLabel.c_str(), &val))
-            {
-                CHECK(false);
-            }
+            double val = rri->getValue(eigenValueLabel.c_str());
 
             clog<<"EigenValue "<<i<<": "<<val<<endl;
             CHECK_CLOSE(aKey->AsFloat(), val, 1e-5);
@@ -434,8 +661,6 @@ SUITE(TEST_MODEL)
     {
         CHECK(gRR!=NULL);
 
-        setComputeAndAssignConservationLaws(gRR, true);
-
         IniSection* aSection = iniFile.GetSection("Eigenvalue Matrix");
 
         //Read in the reference data, from the ini file
@@ -444,41 +669,60 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_EIGENVALUE_MATRIX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_CONCENTRATIONS);
+        RoadRunner* rri = castToRoadRunner(gRR);
+        ls::DoubleMatrix ref = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        std::vector<ls::Complex> eigen = rri->getFullEigenValues();
+
+        compareMatrices(ref, eigen);
+    }
+
+
+    TEST(GET_EIGENVALUE_AMOUNT_MATRIX)
+    {
+        CHECK(gRR!=NULL);
+
+        IniSection* aSection = iniFile.GetSection("Eigenvalue Amount Matrix");
+
+        //Read in the reference data, from the ini file
+        if(!aSection || !gRR)
+        {
+            return;
+        }
+        clog<< endl << "==== GET_EIGENVALUE AMOUNT MATRIX ====" << endl << endl;
+        aSection->mIsUsed = true;
+
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_AMOUNTS);
+        RoadRunner* rri = castToRoadRunner(gRR);
         ls::DoubleMatrix     ref = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        std::vector<ls::Complex> eigen = rri->getFullEigenValues();
 
-        RRDoubleMatrixPtr matrix = getEigenvalues(gRR);
-        if(!matrix)
+        compareMatrices(ref, eigen);
+    }
+
+
+    TEST(GET_REDUCED_EIGENVALUE_MATRIX)
+    {
+        CHECK(gRR!=NULL);
+
+        IniSection* aSection = iniFile.GetSection("Reduced Eigenvalue Matrix");
+
+        //Read in the reference data, from the ini file
+        if(!aSection || !gRR)
         {
-            CHECK(false);
             return;
         }
+        clog<< endl << "==== GET_REDUCED_EIGENVALUE_MATRIX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        if(!matrix || matrix->RSize != ref.RSize())
-        {
-            CHECK(false);
-            return;
-        }
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_CONCENTRATIONS);
+        RoadRunner* rri = castToRoadRunner(gRR);
+        ls::DoubleMatrix     ref = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        std::vector<ls::Complex>  eigen = rri->getReducedEigenValues();
 
-        clog<<"Reference Matrix:\n";
-        clog<<ref<<endl;
-
-        clog<<"Calculated Matrix:";
-        clog<<matrixToString(matrix);
-
-        for(int i = 0 ; i < ref.RSize(); i++)
-        {
-            double val;
-            if(!getMatrixElement(matrix, i , 0, &val))
-            {
-                CHECK(false);
-            }
-            CHECK_CLOSE(ref(i,0), val, 1e-5);
-
-        }
-        freeMatrix(matrix);
-
-
+        compareMatrices(ref, eigen);
     }
 
 
@@ -493,38 +737,31 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== STOICHIOMETRY_MATRIX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
         ls::DoubleMatrix     ref         = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        RoadRunner* rri = castToRoadRunner(gRR);
+        ls::DoubleMatrix matrix = rri->getFullStoichiometryMatrix();
+        compareMatrices(ref, matrix);
+      }
 
-        RRDoubleMatrixPtr matrix = getStoichiometryMatrix(gRR);
-        if(!matrix)
+    TEST(REDUCED_STOICHIOMETRY_MATRIX)
+    {
+        CHECK(gRR!=NULL);
+
+        //Read in the reference data, from the ini file
+        IniSection* aSection = iniFile.GetSection("Reduced Stoichiometry Matrix");
+        if(!aSection || !gRR)
         {
-            CHECK(false);
             return;
         }
+        clog<< endl << "==== REDUCED STOICHIOMETRY_MATRIX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        if(!matrix || matrix->RSize != ref.RSize())
-        {
-            CHECK(false);
-            return;
-        }
-
-        clog<<"Reference Matrix:\n";
-        clog<<ref<<endl;
-
-        clog<<"Calculated Matrix:";
-        clog<<matrixToString(matrix);
-
-        for(int i = 0 ; i < ref.RSize(); i++)
-        {
-            double val;
-            if(!getMatrixElement(matrix, i , 0, &val))
-            {
-                CHECK(false);
-            }
-            CHECK_CLOSE(ref(i,0), val, 1e-6);
-        }
-        freeMatrix(matrix);
+        ls::DoubleMatrix     ref         = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        RoadRunner* rri = castToRoadRunner(gRR);
+        ls::DoubleMatrix matrix = rri->getReducedStoichiometryMatrix();
+        compareMatrices(ref, matrix);
       }
 
     TEST(LINK_MATRIX)
@@ -538,37 +775,12 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== LINK_MATRIX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-           ls::DoubleMatrix     ref         = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        ls::DoubleMatrix     ref         = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
 
         RRDoubleMatrixPtr matrix = getLinkMatrix(gRR);
-        if(!matrix)
-        {
-            CHECK(false);
-            return;
-        }
-
-        if(!matrix || matrix->RSize != ref.RSize())
-        {
-            CHECK(false);
-            return;
-        }
-
-        clog<<"Reference Matrix:\n";
-        clog<<ref<<endl;
-
-        clog<<"Calculated Matrix:";
-        clog<<matrixToString(matrix);
-
-        for(int i = 0 ; i < ref.RSize(); i++)
-        {
-            double val;
-            if(!getMatrixElement(matrix, i , 0, &val))
-            {
-                CHECK(false);
-            }
-            CHECK_CLOSE(ref(i,0), val, 1e-6);
-        }
+        compareMatrices(ref, matrix);
         freeMatrix(matrix);
       }
 
@@ -583,38 +795,37 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<<"\n==== UNSCALED_ELASTICITY_MATRIX ====\n\n";
+        aSection->mIsUsed = true;
 
-           ls::DoubleMatrix     ref         = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_CONCENTRATIONS);
+        RoadRunner* rri = castToRoadRunner(gRR);
+        //trySteadyState(gRR);
+        ls::DoubleMatrix     ref = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        ls::DoubleMatrix  matrix = rri->getUnscaledElasticityMatrix();
 
-        RRDoubleMatrixPtr matrix = getUnscaledElasticityMatrix(gRR);
-        if(!matrix)
+        compareMatrices(ref, matrix);
+      }
+
+    TEST(UNSCALED_ELASTICITY_AMOUNT_MATRIX)
+    {
+        CHECK(gRR!=NULL);
+
+        //Read in the reference data, from the ini file
+        IniSection* aSection = iniFile.GetSection("Unscaled Elasticity Amount Matrix");
+        if(!aSection || !gRR)
         {
-            CHECK(false);
             return;
         }
+        clog<<"\n==== UNSCALED_ELASTICITY_AMOUNT_MATRIX ====\n\n";
+        aSection->mIsUsed = true;
 
-        if(!matrix || matrix->RSize != ref.RSize())
-        {
-            CHECK(false);
-            return;
-        }
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_AMOUNTS);
+        RoadRunner* rri = castToRoadRunner(gRR);
+        //trySteadyState(gRR);
+        ls::DoubleMatrix     ref = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        ls::DoubleMatrix  matrix = rri->getUnscaledElasticityMatrix();
 
-        clog<<"Reference Matrix:\n";
-        clog<<ref<<endl;
-
-        clog<<"Calculated Matrix:";
-        clog<<matrixToString(matrix);
-
-        for(int i = 0 ; i < ref.RSize(); i++)
-        {
-            double val;
-            if(!getMatrixElement(matrix, i , 0, &val))
-            {
-                CHECK(false);
-            }
-            CHECK_CLOSE(ref(i,0), val, 1e-6);
-        }
-        freeMatrix(matrix);
+        compareMatrices(ref, matrix);
       }
 
     TEST(SCALED_ELASTICITY_MATRIX)
@@ -628,41 +839,37 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<<"\n==== SCALED_ELASTICITY_MATRIX ====\n\n";
+        aSection->mIsUsed = true;
 
-        ls::DoubleMatrix     ref         = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_CONCENTRATIONS);
+        RoadRunner* rri = castToRoadRunner(gRR);
+        //trySteadyState(gRR);
+        ls::DoubleMatrix     ref = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        ls::DoubleMatrix  matrix = rri->getScaledElasticityMatrix();
 
-        double test;
-        steadyState(gRR, &test);
-        RRDoubleMatrixPtr matrix = getScaledElasticityMatrix(gRR);
-        if(!matrix)
+        compareMatrices(ref, matrix);
+      }
+
+    TEST(SCALED_ELASTICITY_AMOUNT_MATRIX)
+    {
+        CHECK(gRR!=NULL);
+
+        //Read in the reference data, from the ini file
+        IniSection* aSection = iniFile.GetSection("Scaled Elasticity Amount Matrix");
+        if(!aSection || !gRR)
         {
-            CHECK(false);
             return;
         }
+        clog<<"\n==== SCALED_ELASTICITY_AMOUNT_MATRIX ====\n\n";
+        aSection->mIsUsed = true;
 
-        clog<<"Reference Matrix:\n";
-        clog<<ref<<endl;
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_AMOUNTS);
+        RoadRunner* rri = castToRoadRunner(gRR);
+        //trySteadyState(gRR);
+        ls::DoubleMatrix     ref = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
+        ls::DoubleMatrix  matrix = rri->getScaledElasticityMatrix();
 
-        clog<<"Calculated Matrix:";
-        clog<<matrixToString(matrix);
-
-        if(!matrix || matrix->RSize != ref.RSize())
-        {
-            CHECK(false);
-            return;
-        }
-
-        for(int i = 0 ; i < ref.RSize(); i++)
-        {
-            double val;
-            if(!getMatrixElement(matrix, i , 0, &val))
-            {
-                CHECK(false);
-            }
-            CHECK_CLOSE(ref(i,0), val, 1e-5);
-
-        }
-        freeMatrix(matrix);
+        compareMatrices(ref, matrix);
       }
 
     TEST(UNSCALED_CONCENTRATION_CONTROL_MATRIX)
@@ -677,38 +884,12 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<<"\n==== UNSCALED_CONCENTRATION_CONTROL_MATRIX ====\n\n";
+        aSection->mIsUsed = true;
 
         ls::DoubleMatrix     ref         = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
 
         RRDoubleMatrixPtr matrix = getUnscaledConcentrationControlCoefficientMatrix(gRR);
-        if(!matrix)
-        {
-            CHECK(false);
-            return;
-        }
-
-        clog<<"Reference Matrix:\n";
-        clog<<ref<<endl;
-
-        clog<<"Calculated Matrix:";
-        clog<<matrixToString(matrix);
-
-        if(!matrix || matrix->RSize != ref.RSize())
-        {
-            CHECK(false);
-            return;
-        }
-
-        for(int i = 0 ; i < ref.RSize(); i++)
-        {
-            double val;
-            if(!getMatrixElement(matrix, i , 0, &val))
-            {
-                CHECK(false);
-            }
-            CHECK_CLOSE(ref(i,0), val, 1e-6);
-
-        }
+        compareMatrices(ref, matrix);
         freeMatrix(matrix);
     }
 
@@ -723,38 +904,12 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<<"\n==== SCALED_CONCENTRATION_CONTROL_MATRIX ====\n\n";
+        aSection->mIsUsed = true;
 
         ls::DoubleMatrix     ref         = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
 
         RRDoubleMatrixPtr matrix = getScaledConcentrationControlCoefficientMatrix(gRR);
-        if(!matrix)
-        {
-            CHECK(false);
-            return;
-        }
-
-          clog<<"Reference Matrix:\n";
-        clog<<ref<<endl;
-
-          clog<<"Calculated Matrix:";
-        clog<<matrixToString(matrix);
-
-        if(!matrix || matrix->RSize != ref.RSize())
-        {
-            CHECK(false);
-            return;
-        }
-
-        for(int i = 0 ; i < ref.RSize(); i++)
-        {
-            double val;
-            if(!getMatrixElement(matrix, i , 0, &val))
-            {
-                CHECK(false);
-            }
-            CHECK_CLOSE(ref(i,0), val, 1e-6);
-
-        }
+        compareMatrices(ref, matrix);
         freeMatrix(matrix);
       }
 
@@ -769,38 +924,12 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<<"\n==== UNSCALED_FLUX_CONTROL_MATRIX ====\n\n";
+        aSection->mIsUsed = true;
 
         ls::DoubleMatrix     ref         = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
 
         RRDoubleMatrixPtr matrix = getUnscaledFluxControlCoefficientMatrix(gRR);
-        if(!matrix)
-        {
-            CHECK(false);
-            return;
-        }
-
-          clog<<"Reference Matrix:\n";
-        clog<<ref<<endl;
-
-          clog<<"Calculated Matrix:";
-        clog<<matrixToString(matrix);
-
-        if(!matrix || matrix->RSize != ref.RSize())
-        {
-            CHECK(false);
-            return;
-        }
-
-        for(int i = 0 ; i < ref.RSize(); i++)
-        {
-            double val;
-            if(!getMatrixElement(matrix, i , 0, &val))
-            {
-                CHECK(false);
-            }
-            CHECK_CLOSE(ref(i,0), val, 1e-6);
-
-        }
+        compareMatrices(ref, matrix);
         freeMatrix(matrix);
       }
 
@@ -815,38 +944,12 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== SCALED_FLUX_CONTROL_MATRIX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
         ls::DoubleMatrix     ref         = getDoubleMatrixFromString(aSection->GetNonKeysAsString());
 
         RRDoubleMatrixPtr matrix = getScaledFluxControlCoefficientMatrix(gRR);
-        if(!matrix)
-        {
-            CHECK(false);
-            return;
-        }
-
-          clog<<"Reference Matrix:\n";
-        clog<<ref<<endl;
-
-          clog<<"Calculated Matrix:";
-        clog<<matrixToString(matrix);
-
-        if(!matrix || matrix->RSize != ref.RSize())
-        {
-            CHECK(false);
-            return;
-        }
-
-        for(int i = 0 ; i < ref.RSize(); i++)
-        {
-            double val;
-            if(!getMatrixElement(matrix, i , 0, &val))
-            {
-                CHECK(false);
-            }
-            CHECK_CLOSE(ref(i,0), val, 1e-6);
-
-        }
+        compareMatrices(ref, matrix);
         freeMatrix(matrix);
       }
 
@@ -858,13 +961,9 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== FLOATING_SPECIES_IDS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getFloatingSpeciesIds(gRR);
 
@@ -873,7 +972,7 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
+        vector<string> selList = splitString(keys," ,");
         CHECK(selList.size() == list->Count);
         for(int i = 0; i < selList.size(); i++)
         {
@@ -890,13 +989,9 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== BOUNDARY_SPECIES_IDS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getBoundarySpeciesIds(gRR);
 
@@ -905,7 +1000,7 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
+        vector<string> selList = splitString(keys," ,");
         CHECK(selList.size() == list->Count);
         for(int i = 0; i < selList.size(); i++)
         {
@@ -922,13 +1017,9 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GLOBAL_PARAMETER_IDS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getGlobalParameterIds(gRR);
 
@@ -937,7 +1028,7 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
+        vector<string> selList = splitString(keys," ,");
         CHECK(selList.size() == list->Count);
         for(int i = 0; i < selList.size(); i++)
         {
@@ -954,13 +1045,9 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== COMPARTMENT_IDS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getCompartmentIds(gRR);
 
@@ -969,7 +1056,7 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
+        vector<string> selList = splitString(keys," ,");
         CHECK(selList.size() == list->Count);
         for(int i = 0; i < selList.size(); i++)
         {
@@ -986,13 +1073,9 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== REACTION_IDS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getReactionIds(gRR);
 
@@ -1001,7 +1084,7 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
+        vector<string> selList = splitString(keys," ,");
         CHECK(selList.size() == list->Count);
         for(int i = 0; i < selList.size(); i++)
         {
@@ -1012,19 +1095,15 @@ SUITE(TEST_MODEL)
 
     TEST(SPECIES_INITIAL_CONDITION_IDS)
     {
-        IniSection* aSection = iniFile.GetSection("Species Initial Condition Ids");
+        IniSection* aSection = iniFile.GetSection("Species Initial Concentration Ids");
         if(!aSection || !gRR)
         {
             return;
         }
         clog<< endl << "==== SPECIES_INITIAL_CONDITION_IDS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getFloatingSpeciesInitialConditionIds(gRR);
 
@@ -1033,7 +1112,7 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
+        vector<string> selList = splitString(keys," ,");
         CHECK(selList.size() == list->Count);
         for(int i = 0; i < selList.size(); i++)
         {
@@ -1050,13 +1129,9 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_EIGENVALUE_IDS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getEigenvalueIds(gRR);
 
@@ -1065,7 +1140,7 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
+        vector<string> selList = splitString(keys," ,");
         CHECK(selList.size() == list->Count);
         for(int i = 0; i < selList.size(); i++)
         {
@@ -1082,13 +1157,9 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_RATES_OF_CHANGE_IDS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getRatesOfChangeIds(gRR);
 
@@ -1097,7 +1168,7 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
+        vector<string> selList = splitString(keys," ,");
         CHECK(selList.size() == list->Count);
         for(int i = 0; i < selList.size(); i++)
         {
@@ -1117,15 +1188,11 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== SET_STEADY_STATE_SELECTION_LIST_2 ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
-        bool res = setSteadyStateSelectionList(gRR, aKey->mValue.c_str());
+        bool res = setSteadyStateSelectionList(gRR, keys.c_str());
         CHECK(res);
     }
 
@@ -1137,13 +1204,9 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_STEADY_STATE_SELECTION_LIST_2 ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getSteadyStateSelectionList(gRR);
 
@@ -1152,7 +1215,7 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
+        vector<string> selList = splitString(keys," ,");
         CHECK(selList.size() == list->Count);
         for(int i = 0; i < selList.size(); i++)
         {
@@ -1172,15 +1235,11 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== SET_TIME_COURSE_SELECTION_LIST ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
-        bool res = setTimeCourseSelectionList(gRR, aKey->mValue.c_str());
+        bool res = setTimeCourseSelectionList(gRR, keys.c_str());
         CHECK(res);
     }
 
@@ -1192,13 +1251,9 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_TIME_COURSE_SELECTION_LIST ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRStringArrayPtr list = getTimeCourseSelectionList(gRR);
 
@@ -1207,7 +1262,7 @@ SUITE(TEST_MODEL)
             CHECK(false);
             return;
         }
-        vector<string> selList = splitString(aKey->mValue," ,");
+        vector<string> selList = splitString(keys," ,");
         CHECK(selList.size() == list->Count);
         for(int i = 0; i < selList.size(); i++)
         {
@@ -1224,24 +1279,18 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== COMPUTE_STEADY_STATE_VALUES ====" << endl << endl;
+        aSection->mIsUsed = true;
 
         RRVector* values = computeSteadyStateValues(gRR);
 
-        if(!values || values->Count != aSection->KeyCount())
+        string valstr = Trim(aSection->GetNonKeysAsString());
+        vector<string> vals = splitString(valstr, " ");
+        for(int i = 0 ; i < vals.size(); i++)
         {
-            freeVector(values);
-            CHECK(false);
-            return;
-        }
-
-        for(int i = 0 ; i < aSection->KeyCount(); i++)
-        {
-            IniKey *aKey = aSection->GetKey(i);
-
             //Check concentrations
-            CHECK_CLOSE(aKey->AsFloat(), values->Data[i], 1e-6);
+            CHECK_CLOSE(toDouble(vals[i]), values->Data[i], 1e-6);
             clog<<"\n";
-            clog<<"Ref:\t"<<aKey->AsFloat()<<"\tActual:\t "<<values->Data[i]<<endl;
+            clog<<"Ref:\t"<<vals[i]<<"\tActual:\t "<<values->Data[i]<<endl;
         }
         freeVector(values);
     }
@@ -1257,24 +1306,18 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== FLOATING_SPECIES_CONCENTRATIONS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
         RRVector* values = getFloatingSpeciesConcentrations(gRR);
 
-        if(!values || values->Count != aSection->KeyCount())
+        string valstr = Trim(aSection->GetNonKeysAsString());
+        vector<string> vals = splitString(valstr, " ");
+        for(int i = 0 ; i < vals.size(); i++)
         {
-            CHECK(false);
-            freeVector(values);
-            return;
-        }
-
-        for(int i = 0 ; i < aSection->KeyCount(); i++)
-        {
-            IniKey *aKey = aSection->GetKey(i);
-
             //Check concentrations
-            CHECK_CLOSE(aKey->AsFloat(), values->Data[i], 1e-6);
+            CHECK_CLOSE(toDouble(vals[i]), values->Data[i], 1e-6);
             clog<<"\n";
-            clog<<"Ref:\t"<<aKey->AsFloat()<<"\tActual:\t "<<values->Data[i]<<endl;
+            clog<<"Ref:\t"<<vals[i]<<"\tActual:\t "<<values->Data[i]<<endl;
         }
         freeVector(values);
     }
@@ -1290,29 +1333,23 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== BOUNDARY_SPECIES_CONCENTRATIONS ====" << endl << endl;
+        aSection->mIsUsed = true;
 
         RRVector* values = getBoundarySpeciesConcentrations(gRR);
 
-        if(!values || values->Count != aSection->KeyCount())
+        string valstr = Trim(aSection->GetNonKeysAsString());
+        vector<string> vals = splitString(valstr, " ");
+        for(int i = 0 ; i < vals.size(); i++)
         {
-            CHECK(false);
-            freeVector(values);
-            return;
-        }
-
-        for(int i = 0 ; i < aSection->KeyCount(); i++)
-        {
-            IniKey *aKey = aSection->GetKey(i);
-
             //Check concentrations
-            CHECK_CLOSE(aKey->AsFloat(), values->Data[i], 1e-6);
+            CHECK_CLOSE(toDouble(vals[i]), values->Data[i], 1e-6);
             clog<<"\n";
-            clog<<"Ref:\t"<<aKey->AsFloat()<<"\tActual:\t "<<values->Data[i]<<endl;
+            clog<<"Ref:\t"<<vals[i]<<"\tActual:\t "<<values->Data[i]<<endl;
         }
         freeVector(values);
     }
 
-    TEST(GET_GLOBABL_PARAMETER_VALUES)
+    TEST(GET_GLOBAL_PARAMETER_VALUES)
     {
         CHECK(gRR!=NULL);
 
@@ -1322,59 +1359,14 @@ SUITE(TEST_MODEL)
         {
             return;
         }
-        clog<< endl << "==== GET_GLOBABL_PARAMETER_VALUES ====" << endl << endl;
+        clog<< endl << "==== GET_GLOBAL_PARAMETER_VALUES ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRVector* values = getGlobalParameterValues(gRR);
 
-        vector<string> refList = splitString(aKey->mValue," ,");
-
-        if(!values || values->Count != refList.size())
-        {
-            CHECK(false);
-            freeVector(values);
-            return;
-        }
-
-        for(int i = 0 ; i < refList.size(); i++)
-        {
-
-            //Check concentrations
-            CHECK_CLOSE(toDouble(refList[i]), values->Data[i], 1e-6);
-            clog<<"\n";
-            clog<<"Ref:\t"<<toDouble(refList[i])<<"\tActual:\t "<<values->Data[i]<<endl;
-        }
-        freeVector(values);
-    }
-
-    TEST(GET_INITIAL_FLOATING_SPECIES_CONCENTRATIONS)
-    {
-        CHECK(gRR!=NULL);
-
-        //Read in the reference data, from the ini file
-        IniSection* aSection = iniFile.GetSection("Get Initial Floating Species Concs");
-        if(!aSection || !gRR)
-        {
-            return;
-        }
-        clog<< endl << "==== GET_INITIAL_FLOATING_SPECIES_CONCENTRATIONS ====" << endl << endl;
-
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
-
-        RRVector* values = getFloatingSpeciesInitialConcentrations(gRR);
-
-        vector<string> refList = splitString(aKey->mValue," ,");
+        vector<string> refList = splitString(keys," ,");
 
         if(!values || values->Count != refList.size())
         {
@@ -1405,17 +1397,13 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_REACTION_RATES ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRVector* values = getReactionRates(gRR);
 
-        vector<string> refList = splitString(aKey->mValue," ,");
+        vector<string> refList = splitString(keys," ,");
 
         if(!values || values->Count != refList.size())
         {
@@ -1428,7 +1416,7 @@ SUITE(TEST_MODEL)
         {
 
             //Check concentrations
-            CHECK_CLOSE(toDouble(refList[i]), values->Data[i], 1e-6);
+            CHECK_CLOSE(toDouble(refList[i]), values->Data[i], max(1e-9, abs(values->Data[i]*1e-4)));
             clog<<"\n";
             clog<<"Ref:\t"<<toDouble(refList[i])<<"\tActual:\t "<<values->Data[i]<<endl;
         }
@@ -1440,21 +1428,17 @@ SUITE(TEST_MODEL)
         CHECK(gRR!=NULL);
 
         //Read in the reference data, from the ini file
-        IniSection* aSection = iniFile.GetSection("Get Reaction Rates");
+        IniSection* aSection = iniFile.GetSection("Get Reaction Rates By Index");
         if(!aSection || !gRR)
         {
             return;
         }
         clog<< endl << "==== GET_REACTION_RATE_BY_INDEX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
-        vector<string> refList = splitString(aKey->mValue," ,");
+        vector<string> refList = splitString(keys," ,");
 
         if(refList.size() != getNumberOfReactions(gRR))
         {
@@ -1485,16 +1469,12 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== NUMBER_OF_DEPENDENT_SPECIES ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        if(aSection->KeyCount() < 1)
-        {
-            CHECK(false);
-          }
+        string key = Trim(aSection->GetNonKeysAsString());
+        int val = getNumberOfDependentSpecies(gRR);
 
-          IniKey *aKey = aSection->GetKey(0);
-          int val = getNumberOfDependentSpecies(gRR);
-
-          CHECK(aKey->AsInt() ==  val);
+        CHECK(toInt(key) ==  val);
     }
 
     TEST(NUMBER_OF_INDEPENDENT_SPECIES)
@@ -1505,36 +1485,28 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== NUMBER_OF_INDEPENDENT_SPECIES ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        if(aSection->KeyCount() < 1)
-        {
-            CHECK(false);
-          }
+        string key = Trim(aSection->GetNonKeysAsString());
+        int val = getNumberOfIndependentSpecies(gRR);
 
-          IniKey *aKey = aSection->GetKey(0);
-          int val = getNumberOfIndependentSpecies(gRR);
-
-          CHECK(aKey->AsInt() ==  val);
+        CHECK(toInt(key) ==  val);
     }
 
-    TEST(NUMBER_OF_RULES)
+    TEST(NUMBER_OF_RATE_RULES)
     {
-        IniSection* aSection = iniFile.GetSection("Number of Rules");
+        IniSection* aSection = iniFile.GetSection("Number of Rate Rules");
         if(!aSection)
         {
             return;
         }
-        clog<< endl << "==== NUMBER_OF_RULES ====" << endl << endl;
+        clog<< endl << "==== NUMBER_OF_RATE_RULES ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        if(aSection->KeyCount() < 1)
-        {
-            CHECK(false);
-          }
+        string key = Trim(aSection->GetNonKeysAsString());
+        int val = getNumberOfRules(gRR);
 
-          IniKey *aKey = aSection->GetKey(0);
-          int val = getNumberOfRules(gRR);
-
-          CHECK(aKey->AsInt() ==  val);
+        CHECK(toInt(key) ==  val);
     }
 
     TEST(GET_RATES_OF_CHANGE)
@@ -1548,17 +1520,13 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_RATES_OF_CHANGE ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* aKey = aSection->GetKey("list");
-        if(!aKey)
-        {
-            CHECK(false);
-            return;
-        }
+        string keys = Trim(aSection->GetNonKeysAsString());
 
         RRVector* values = getRatesOfChange(gRR);
 
-        vector<string> refList = splitString(aKey->mValue," ,");
+        vector<string> refList = splitString(keys," ,");
 
         if(!values || values->Count != refList.size())
         {
@@ -1588,15 +1556,16 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_REACTION_RATES_EX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* conc = aSection->GetKey("list1");
+        IniKey* conc = aSection->GetKey("concentrations");
         if(!conc)
         {
             CHECK(false);
             return;
         }
 
-        IniKey* refs = aSection->GetKey("list2");
+        IniKey* refs = aSection->GetKey("rates");
         if(!refs)
         {
             CHECK(false);
@@ -1646,15 +1615,16 @@ SUITE(TEST_MODEL)
             return;
         }
         clog<< endl << "==== GET_RATES_OF_CHANGE_EX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* conc = aSection->GetKey("list1");
+        IniKey* conc = aSection->GetKey("concentrations");
         if(!conc)
         {
             CHECK(false);
             return;
         }
 
-        IniKey* refs = aSection->GetKey("list2");
+        IniKey* refs = aSection->GetKey("rates");
         if(!refs)
         {
             CHECK(false);
@@ -1693,56 +1663,71 @@ SUITE(TEST_MODEL)
         freeVector(aVector);
     }
 
-    TEST(GET_RATE_OF_CHANGE_BY_INDEX)
+    TEST(GET_RATES_OF_CHANGE_BY_INDEX)
     {
         CHECK(gRR!=NULL);
 
         //Read in the reference data, from the ini file
-        IniSection* aSection = iniFile.GetSection("Get Rates Of Change Ex");
+        IniSection* aSection = iniFile.GetSection("Get Rates Of Change By Index");
         if(!aSection || !gRR)
         {
             return;
         }
-        clog<< endl << "==== GET_RATE_OF_CHANGE_BY_INDEX ====" << endl << endl;
+        clog<< endl << "==== GET_RATES_OF_CHANGE_BY_INDEX ====" << endl << endl;
+        aSection->mIsUsed = true;
 
-        IniKey* conc = aSection->GetKey("list1");
-        if(!conc)
+        string keys = Trim(aSection->GetNonKeysAsString());
+
+        vector<string> refList = splitString(keys," ,");
+
+        if(refList.size() != getNumberOfFloatingSpecies(gRR))
         {
             CHECK(false);
             return;
         }
-
-        IniKey* refs = aSection->GetKey("list2");
-        if(!refs)
-        {
-            CHECK(false);
-            return;
-        }
-
-          vector<string> refList = splitString(refs->mValue," ");
-
-          vector<string> concList = splitString(conc->mValue," ");
-          RRVector* aVector = createVector(concList.size());
-
-          for(int i = 0; i < concList.size(); i++)
-          {
-            aVector->Data[i] = toDouble(concList[i]);
-          }
 
         for(int i = 0 ; i < refList.size(); i++)
         {
             double value;
-              if(!getRateOfChange(gRR, i, &value))
-              {
+            if(!getRateOfChange(gRR, i, &value))
+            {
                 CHECK(false);
-              }
+            }
 
             //Check concentrations
             CHECK_CLOSE(toDouble(refList[i]), value, 1e-6);
             clog<<"\n";
             clog<<"Ref:\t"<<toDouble(refList[i])<<"\tActual:\t "<<value<<endl;
         }
-        freeVector(aVector);
+    }
+
+    TEST(AMOUNT_CONCENTRATION_JACOBIANS)
+    {
+        IniSection* aSection = iniFile.GetSection("Amount/Concentration Jacobians");
+        if(!aSection)
+        {
+            return;
+        }
+        clog<< endl << "==== AMOUNT_CONCENTRATION_JACOBIANS ====" << endl << endl;
+        aSection->mIsUsed = true;
+        rr::Variant saved = Config::getValue(Config::ROADRUNNER_JACOBIAN_MODE);
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_AMOUNTS);
+        compareJacobians(gRR);
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, (unsigned)Config::ROADRUNNER_JACOBIAN_MODE_CONCENTRATIONS);
+        compareJacobians(gRR);
+        Config::setValue(Config::ROADRUNNER_JACOBIAN_MODE, saved);
+    }
+
+    TEST(CHECK_UNUSED_TESTS)
+    {
+        for(int i=0; i<iniFile.GetNumberOfSections(); i++)
+        {
+            if (!iniFile.GetSection(i)->mIsUsed)
+            {
+                CHECK(false);
+                clog << "Unused section:\t" << iniFile.GetSection(i)->mName << endl;
+            }
+        }
     }
 
     TEST(FREE_RR_INSTANCE)

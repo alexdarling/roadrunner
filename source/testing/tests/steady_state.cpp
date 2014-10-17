@@ -104,7 +104,7 @@ string TestModelFileName;
             return;
         }
 
-        vector<string> ids = aRR->getEigenvalueIds();
+        vector<string> ids = aRR->getEigenValueIds();
         if(ids.size() != aSection->KeyCount())
         {
             CHECK(false);
@@ -140,7 +140,7 @@ string TestModelFileName;
             return;
         }
 
-        vector<Complex> eigenVals = aRR->getEigenvaluesCpx();
+        std::vector<ls::Complex> eigenVals = aRR->getFullEigenValues();
         if(eigenVals.size() != aSection->KeyCount())
         {
             CHECK(false);
@@ -153,8 +153,10 @@ string TestModelFileName;
             clog<<"\n";
             clog<<"Ref_EigenValue: "<<aKey->mKey<<": "<<aKey->mValue<<endl;
 
-            clog<<"EigenValue "<<i<<": "<<real(eigenVals[i])<<endl;
-            CHECK_CLOSE(aKey->AsFloat(), real(eigenVals[i]), 1e-6);
+            double eigenVal = std::real(eigenVals[i]);
+
+            clog<<"EigenValue "<<i<<": "<< eigenVal << endl;
+            CHECK_CLOSE(aKey->AsFloat(), eigenVal, 1e-6);
         }
     }
 
