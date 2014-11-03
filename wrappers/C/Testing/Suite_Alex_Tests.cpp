@@ -18,6 +18,7 @@
 #include "rrUtils.h"
 #include "rrException.h"
 #include "rrLogger.h"
+#include "rrRoadrunner.h"
 
 using namespace UnitTest;
 using namespace std;
@@ -25,6 +26,7 @@ using namespace rr;
 using namespace rrc;
 using namespace Poco;
 using namespace Poco::XML;
+using namespace ls;
 
 //using namespace Poco::XML::NodeFilter;
 
@@ -45,7 +47,7 @@ SUITE(ALEX_TESTS)
         loadSBMLFromFileE (mRR1, TestModelFileName.c_str(), true);
         loadSBMLFromFileE (mRR2, TestModelFileName.c_str(), true);
 
-        cout << "\nWords here";
+        cout << "\nThis message shows that the test program is running";
         cout << "\n";
 
         CHECK (simulateEx (mRR1, 0, 10, 100));
@@ -64,10 +66,22 @@ SUITE(ALEX_TESTS)
         freeRRInstance (mRR2);
     }
 
+    TEST(GET_SET_SEED)
+    {
+        RRHandle mRR                 = createRRInstanceEx (gTempFolder.c_str(), gCompiler.c_str());
+        string TestModelFileName     = joinPath(gTestDataFolder, "Test_1.xml");
+        loadSBMLFromFileE (mRR, TestModelFileName.c_str(), true);
+        long result;
+        long seed = 1234;
+        CHECK (setSeed (mRR, seed));
+        CHECK (getSeed (mRR, &result));
+        CHECK (result == seed);
+    }
+    
     TEST(GILLESPIE_MEANS_STDEV)
     {
-        RRDoubleMatrix key;
-        key->RSize() = 10;
+        DoubleMatrix key;
+        // key->RSize = 10;
         /* double key = [0.0	0.6391	0.6982	0.6604	
         0.0	0.6499	0.6776	0.6538	
         0.0	0.6481	0.6924	0.6543	
